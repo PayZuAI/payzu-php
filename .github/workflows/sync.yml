@@ -1,0 +1,77 @@
+name: Sync from payzu-sdks
+
+on:
+  schedule:
+    - cron: '30 * * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag de release do payzu-sdks (ex: v2.0.0). Vazio: última release.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          TAG="${INPUT_TAG:-$(gh release view -R PayZuAI/payzu-sdks --json tagName -q .tagName 2>/dev/null || true)}"
+          if [ -z "$TAG" ]; then
+            echo "Nenhuma release no payzu-sdks"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+            echo "$TAG já sincronizada"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.release.outputs.skip != 'true'
+        with:
+          repository: PayZuAI/payzu-sdks
+          ref: ${{ steps.release.outputs.tag }}
+          path: sdks
+          persist-credentials: false
+
+      - name: Tag release
+        if: steps.release.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name .git ! -name .github ! -name .gitattributes ! -name sdks -exec rm -rf {} +
+          cp -R sdks/php/. .
+          rm -rf sdks
+          git config user.name "PayZu SDK Bot"
+          git config user.email "noreply@payzu.com.br"
+          git add -A
+          git commit --allow-empty -m "Release $TAG"
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
+
+      - name: Update Packagist
+        if: steps.release.outputs.skip != 'true' && vars.PACKAGIST_USERNAME != ''
+        env:
+          PACKAGIST_USERNAME: ${{ vars.PACKAGIST_USERNAME }}
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
+        run: |
+          curl -sf -XPOST -H "content-type:application/json" \
+            "https://packagist.org/api/update-package?username=${PACKAGIST_USERNAME}&apiToken=${PACKAGIST_TOKEN}" \
+            -d '{"repository":{"url":"https://github.com/PayZuAI/payzu-php"}}'
